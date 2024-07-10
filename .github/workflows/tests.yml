@@ -79,7 +79,7 @@ jobs:
 
   check-PR:
     # Check if there is a PR - allows one main workflow with dependency on previous jobs
-    needs: [code-quality-checks, python-tests, check-docs]
+    # needs: [code-quality-checks, python-tests, check-docs]
     runs-on: ubuntu-latest
     outputs:
       PR_status: ${{ steps.PR.outputs.pr_found }}
