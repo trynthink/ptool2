@@ -1,6 +1,7 @@
 import pandas as pd
 import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -97,6 +98,12 @@ class ScoutCompare():
         compare_recursive(dict1, dict2)
         return diff_report
 
+    def split_json_key_path(self, path):
+        keys = re.findall(r"\['(.*?)'\]", path)
+        if len(keys) == 5:
+            keys[4:4] = [None, None, None]
+        return keys
+
     def write_dict_key_report(self, diff_report, output_path):
         if diff_report.empty:
             return
@@ -104,10 +111,22 @@ class ScoutCompare():
         print(f"Wrote dictionary key report to {output_path}")
 
     def write_dict_value_report(self, diff_report, output_path):
-        df = pd.DataFrame(columns=["Results path", "Percent difference"],
-                          data=list(zip(diff_report.keys(), diff_report.values())))
+        col_headers = [
+            "ECM",
+            "Markets and Savings Type",
+            "Adoption Scenario",
+            "Results Scenario",
+            "Climate Zone",
+            "Building Class",
+            "End Use",
+            "Year"
+        ]
+        df = pd.DataFrame(columns=["Results path"], data=list(diff_report.keys()))
         if df.empty:
             return
+        df[col_headers] = df["Results path"].apply(self.split_json_key_path).apply(pd.Series)
+        df["Percent difference"] = [round(diff, 2) for diff in diff_report.values()]
+        df = df.dropna(axis=1, how="all")
         df.to_csv(output_path, index=False)
         print(f"Wrote dictionary value report to {output_path}")
 
