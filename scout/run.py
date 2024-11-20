@@ -5455,7 +5455,7 @@ def main(opts: argparse.NameSpace):  # noqa: F821
             for k, v in data.items():
                 data[k] = round_values(v, precision)
         elif isinstance(data, float):
-            data = round(data, precision)
+            data = round(data*1.5, precision)
         return data
 
     a_run.output_ecms = round_values(a_run.output_ecms, 6)
