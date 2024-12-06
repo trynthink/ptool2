@@ -26806,6 +26806,7 @@ class AddedSubMktFractionsTest(unittest.TestCase, CommonMethods, Constants):
         adopt_scheme (str): Technology adoption scheme.
         sample_measlist_out_data (list): Additional market shares to add
             to each measure after running the function.
+        sample_noapply_sbmkt_fracs_scale (list): Measure market scaling fractions to test.
     """
 
     @classmethod
@@ -26816,6 +26817,7 @@ class AddedSubMktFractionsTest(unittest.TestCase, CommonMethods, Constants):
         # Set standard adoption schemes
         cls.handyvars.adopt_schemes = [
             "Technical potential", "Max adoption potential"]
+        cls.handyvars.aeo_years = ["2009", "2010"]
         sample_measure1 = {
             "name": "sample sub-market test measure 1",
             "measure_type": "full service",
@@ -26962,6 +26964,19 @@ class AddedSubMktFractionsTest(unittest.TestCase, CommonMethods, Constants):
              {"2009": 1, "2010": 1}]]
         cls.sample_mseg_key = "sample mseg key"
         cls.adopt_scheme = "Technical potential"
+        cls.sample_noapply_sbmkt_fracs_scale = []
+        for m_s in cls.sample_measlist_in:
+            cls.sample_noapply_sbmkt_fracs_scale.append([
+                {yr: 1 - m.markets[cls.adopt_scheme]["competed"]["mseg_adjust"][
+                    "contributing mseg keys and values"][cls.sample_mseg_key][
+                    "sub-market scaling"] for yr in cls.handyvars.aeo_years}
+                if not isinstance(m.markets[cls.adopt_scheme]["competed"][
+                    "mseg_adjust"]["contributing mseg keys and values"][cls.sample_mseg_key][
+                    "sub-market scaling"], dict)
+                else {yr: 1 - m.markets[cls.adopt_scheme]["competed"]["mseg_adjust"][
+                    "contributing mseg keys and values"][cls.sample_mseg_key][
+                    "sub-market scaling"][yr] for yr in cls.handyvars.aeo_years}
+                for m in m_s])
         cls.sample_measlist_out_data = [
             [{"2009": 0, "2010": 0},
              {"2009": 0, "2010": 0},
@@ -26993,7 +27008,7 @@ class AddedSubMktFractionsTest(unittest.TestCase, CommonMethods, Constants):
             measures_sbmkt_frac_data = a_run.find_added_sbmkt_fracs(
                 self.sample_mkt_fracs[ind], self.sample_measlist_in[ind],
                 self.sample_mseg_key, self.adopt_scheme,
-                self.handyvars.aeo_years)
+                self.handyvars.aeo_years, self.sample_noapply_sbmkt_fracs_scale[ind])
             # Check the added market fractions for each measure and year
             for ind_out in range(len(measures_sbmkt_frac_data)):
                 self.dict_check(self.sample_measlist_out_data[ind][ind_out],

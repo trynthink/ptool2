@@ -17,6 +17,7 @@ from scout.config import FilePaths as fp
 from scout.config import Config
 import warnings
 import itertools
+import pandas as pd
 
 
 class UsefulInputFiles(object):
@@ -60,6 +61,7 @@ class UsefulInputFiles(object):
         self.gcam_out = fp.RESULTS / "msegs_emm_gcam_alt.json"
         self.gcam_map = fp.CONVERT_DATA / "gcam_map.json"
         self.cpi_data = fp.CONVERT_DATA / "cpi.csv"
+        self.state_appl_regs = fp.SUB_FED / "state_appl_regs.csv"
         # Set heating/cooling energy totals file conditional on: 1) regional
         # breakout used, and 2) whether site energy data, source energy data
         # (fossil equivalent site-source conversion), or source energy data
@@ -342,6 +344,63 @@ class UsefulVars(object):
                 cpi_row_metr = numpy.mean(cpi_row_metr)
             # Calculate ratio of metric year CPI index to common year CPI index
             self.cost_convert[metr] = cpi_row_cmn / cpi_row_metr
+
+        # Import/finalize input data on sub-federal regulations on certain types of appliances
+        self.import_state_regs(handyfiles)
+
+    def import_state_regs(self, handyfiles):
+        """Import and further prepare sub-federal appliance regulation data.
+
+        Args:
+            handyfiles (object): File paths.
+        """
+
+        # Try importing sub-federal appliance regulation data; if not available,
+        # set to empty list
+        try:
+            state_regs_dat = pd.read_csv(handyfiles.state_appl_regs)
+            # Initialize regulated segments list
+            self.state_appl_reg_segs = []
+            for index, row in state_regs_dat.iterrows():
+                # Set applicable state(s), building type(s), building vintage(s), fuel type(s).
+                # end use(s), and tech(s)
+                state, bldg, vint, fuel, eu, tech = [
+                    [x.strip()] if "," not in x else [y.strip() for y in x.split(",")]
+                    for x in row.values[1:-3]]
+                # Set start year and applicability fraction
+                yr, frac = [[row.values[-3]], [row.values[-2]]]
+                # Check for bundle of U.S. Climate Alliance (UCSA) states
+                if len(state) == 1 and state[0].lower() == "usca":
+                    state = ["AZ", "CA", "CO", "CT", "DE", "HI", "IL", "ME", "MD", "MA", "MI",
+                             "MN", "NJ", "NM", "NY", "NC", "OR", "PA", "RI", "VT", "WA", "WI"]
+                # Fill out 'all' entries across building type categories when present
+                for b_ind, b in enumerate(bldg):
+                    if b == "all residential":
+                        bldg.extend(["single family home", "multi family home", "mobile home"])
+                        # Remove original 'all' entry
+                        bldg.remove(bldg[b_ind])
+                    elif b == "all commercial":
+                        bldg.extend(["assembly", "education", "food sales", "food service",
+                                     "health care", "lodging", "large office", "small office",
+                                     "mercantile/service", "warehouse", "other", "unspecified"])
+                        # Remove original 'all' entry
+                        bldg.remove(bldg[b_ind])
+                # Fill out 'all' entries for building vintage
+                if len(vint) == 1 and vint[0] == "all":
+                    vint = ["new", "existing"]
+                # Fill out 'all' entries for fuel type
+                if len(fuel) == 1 and fuel[0] == "all fossil":
+                    fuel = ["natural gas", "distillate", "other fuel"]
+                # Fill out 'all' entries for end use
+                if len(eu) == 1 and eu[0] == "all fossil":
+                    eu = ["heating", "water heating", "cooking", "drying"]
+                # Put final data together into a list
+                mseg_params = [x for x in [state, bldg, vint, fuel, eu, tech, yr, frac]]
+                # Put all combinations of the list elements into unique rows
+                self.state_appl_reg_segs.extend(list(itertools.product(*mseg_params)))
+        except FileNotFoundError:
+            # Set regulated segments list to empty
+            self.state_appl_reg_segs = []
 
 
 class Measure(object):
@@ -1545,6 +1604,13 @@ class Engine(object):
         mkt_entry_yrs = [
             m.market_entry_year for m in measures_adj]
 
+        # Determine whether any sub-federal appliance use restrictions (e.g., emissions standards
+        # on fossil appliances) affect the current competed microsegment/measures in the competed
+        # set. Reflect these effects on years measure is allowed on the market, and in cases where
+        # the restriction is only partial, the fraction of market affected by it.
+        yrs_on_mkt, noapply_sbmkt_fracs_regs = self.state_app_reg_screen(
+            measures_adj, stk_cost_dat_keys)
+
         # Loop through competing measures and calculate market shares for
         # each based on their annualized capital and operating costs
         for ind, m in enumerate(measures_adj):
@@ -1553,7 +1619,7 @@ class Engine(object):
             # Loop through all years in time horizon
             for yr in self.handyvars.aeo_years:
                 # Ensure measure is on the market in given year
-                if yr in m.yrs_on_mkt:
+                if yr in yrs_on_mkt[ind]:
                     # Set measure capital and operating cost inputs. * Note:
                     # operating cost is set to just energy costs (for now), but
                     # could be expanded to include maintenance and carbon costs
@@ -1619,7 +1685,7 @@ class Engine(object):
                 # the measure either splits the market with other
                 # competing measures if none of those measures is on
                 # the market either, or else has a market share of zero
-                if yr in m.yrs_on_mkt:
+                if yr in yrs_on_mkt[ind]:
                     if ((not isinstance(mkt_fracs_tot[yr], numpy.ndarray) and
                          mkt_fracs_tot[yr] != 0) or (
                         isinstance(mkt_fracs_tot[yr], numpy.ndarray) and all(
@@ -1633,11 +1699,12 @@ class Engine(object):
                 else:
                     mkt_fracs[ind][yr] = 0
 
-        # Check for competing ECMs that apply to but a fraction of the competed
-        # market, and apportion the remaining fraction of this market across
-        # the other competing ECMs
-        added_sbmkt_fracs = self.find_added_sbmkt_fracs(
-            mkt_fracs, measures_adj, mseg_key, adopt_scheme, years_on_mkt_all)
+        # Calculate final adjustments to market shares to reflect sub-market scaling fractions
+        # in the measure definition and/or sub-federal appliance restrictions that affect
+        # the current competed market
+        added_sbmkt_fracs, mkt_fracs = self.final_mktshare_adj(
+            measures_adj, mseg_key, adopt_scheme, years_on_mkt_all, mkt_fracs,
+            noapply_sbmkt_fracs_regs)
 
         # Loop through competing measures and apply competed market shares
         # and gains from sub-market fractions to each ECM's total energy,
@@ -1651,7 +1718,6 @@ class Engine(object):
                 adj_list_eff, adj_list_base, adj_stk_trk = \
                 self.compete_adj_dicts(m, mseg_key, adopt_scheme, stk_cost_dat_keys[m_ind])
             for yr in self.handyvars.aeo_years:
-                # Make the adjustment to the measure's stock/energy/carbon/
                 # cost totals and breakouts based on its updated competed
                 # market share and stock turnover rates
                 self.compete_adj(
@@ -1782,6 +1848,13 @@ class Engine(object):
         mkt_entry_yrs = [
             m.market_entry_year for m in measures_adj]
 
+        # Determine whether any sub-federal appliance use restrictions (e.g., emissions standards
+        # on fossil appliances) affect the current competed microsegment/measures in the competed
+        # set. Reflect these effects on years measure is allowed on the market, and in cases where
+        # the restriction is only partial, the fraction of market affected by it.
+        yrs_on_mkt, noapply_sbmkt_fracs_regs = self.state_app_reg_screen(
+            measures_adj, stk_cost_dat_keys)
+
         # Initialize a flag that indicates whether any competing measures
         # have arrays of annualized capital and/or operating costs rather
         # than point values (resultant of distributions on measure inputs),
@@ -1812,7 +1885,7 @@ class Engine(object):
             # Loop through all years in time horizon
             for ind_l, yr in enumerate(self.handyvars.aeo_years):
                 # Ensure measure is on the market in given year
-                if yr in m.yrs_on_mkt:
+                if yr in yrs_on_mkt[ind]:
                     # Set measure capital and operating cost inputs. * Note:
                     # operating cost is set to just energy costs (for now), but
                     # could be expanded to include maintenance and carbon costs
@@ -1891,7 +1964,7 @@ class Engine(object):
                 # the measure either splits the market with other
                 # competing measures if none of those measures is on
                 # the market either, or else has a market share of zero
-                if yr in m.yrs_on_mkt:
+                if yr in yrs_on_mkt[ind]:
                     # Set the fractions of commericial adopters who fall into
                     # each discount rate category for this particular
                     # microsegment
@@ -1995,11 +2068,12 @@ class Engine(object):
                 else:
                     mkt_fracs[ind][yr] = 0
 
-        # Check for competing ECMs that apply to but a fraction of the competed
-        # market, and apportion the remaining fraction of this market across
-        # the other competing ECMs
-        added_sbmkt_fracs = self.find_added_sbmkt_fracs(
-            mkt_fracs, measures_adj, mseg_key, adopt_scheme, years_on_mkt_all)
+        # Calculate final adjustments to market shares to reflect sub-market scaling fractions
+        # in the measure definition and/or sub-federal appliance restrictions that affect
+        # the current competed market
+        added_sbmkt_fracs, mkt_fracs = self.final_mktshare_adj(
+            measures_adj, mseg_key, adopt_scheme, years_on_mkt_all, mkt_fracs,
+            noapply_sbmkt_fracs_regs)
 
         # Loop through competing measures and apply competed market shares
         # and gains from sub-market fractions to each ECM's total energy,
@@ -2022,38 +2096,108 @@ class Engine(object):
                     adj_list_eff, adj_list_base, yr, mseg_key, m, adopt_scheme,
                     mkt_entry_yrs, adj_stk_trk)
 
-    def find_added_sbmkt_fracs(
-            self, mkt_fracs, measures_adj, mseg_key, adopt_scheme,
-            years_on_mkt_all):
-        """Add to competed ECM market shares to account for sub-market scaling.
-
-        Notes:
-            In cases where one or more competing ECM only applies to a fraction
-            of its applicable baseline market (e.g., it is assigned with a
-            sub-market scaling fraction/fractions), the fraction of the market
-            that the ECM(s) does not apply to should be apportioned across the
-            other competing ECMs and added to their competed market shares.
-            This function determines the added fraction that should be added to
-            each ECM's competed market share.
+    def state_app_reg_screen(self, measures_adj, stk_cost_dat_keys):
+        """Determine whether appliance restrictions apply to competed measure mseg.
 
         Args:
-            mkt_fracs (list): ECM market shares (before considering sub-mkts.).
+            measures_adj (object): Competing ECM objects.
+            stk_cost_dat_keys (string): Market microsegment to assess restrictions for.
+
+        Returns:
+            Years that measure is allowed to be on the market, after considering any restrictions
+            on competed market microsegment (e.g., from an emissions-related appliance regulation
+            at the sub-federal level). For years that the measure is on the market but a portion
+            of its market is restricted by such a regulation, that portion is also reported.
+        """
+
+        # Look for any state (or local)-level appliance restrictions on the current microsegment
+        state_appl_regs = (len(self.handyvars.state_appl_reg_segs) != 0)
+        if state_appl_regs:
+            # Separate out components of the mseg information; use mseg information that accounts
+            # for any links/dependencies between mseg and other msegs the measure applies to (
+            # assume that first measure in the competing set is representative of links for all)
+            mseg_separate = literal_eval(stk_cost_dat_keys[0][0])
+            # Shorthand for current mseg region, bldg. type, bldg. vintage, fuel, end use, tech.
+            ctb_mseg_params_notech = (mseg_separate[1], mseg_separate[2], mseg_separate[-1],
+                                      mseg_separate[3], mseg_separate[4])
+            # Determine which (if any) rows in restrictions data apply to current mseg information
+            restrict_rows_no_tech = [
+                x for x in self.handyvars.state_appl_reg_segs if x[:-3] == ctb_mseg_params_notech]
+            # If tech column does not cover "all" technologies, further check for tech restrictions
+            if not any([x[-3] == "all" for x in restrict_rows_no_tech]):
+                # Assume that tech names in input file map to standard Scout/EIA technology names;
+                # therefore, remove any additional information that may have been appended to such
+                # names during preparation to further distinguish msegs with exogenous fuel
+                # switching rates and/or specific heating and cooling tech pairings
+                restrict_rows = [
+                    x for x in restrict_rows_no_tech if mseg_separate[-2].split("-")[0] in x[-3]]
+            else:
+                restrict_rows = restrict_rows_no_tech
+        else:
+            restrict_rows = None
+
+        # If found, reflect restrictions as removal of measure from market (if restriction applies
+        # to 100% of segment) or otherwise as a fraction that restricts the portion of the market
+        # a measure applies to
+        if restrict_rows:
+            # Determine the % of segment the restriction applies to
+            effect_frac = min([x[-1] for x in restrict_rows])
+            # Determine the year in which the restriction goes into effect
+            effect_yr = min([x[-2] for x in restrict_rows])
+            # Register cases where measure switches fuels entirely away from segment or switches
+            # to a new fuel while retaining existing fuel as backup (assume restrictions do not
+            # preclude such cases)
+            meas_switch_avoids_reg = [
+                (m.fuel_switch_to is not None and m.backup_fuel_fraction is None) or
+                (m.fuel_switch_to is not None and "existing" in
+                 mseg_separate) for m in measures_adj]
+            # When there is a restriction, keep measure on market only in years where: a) measure
+            # fuel switches away from restricted segment, b) the restriction is not active, or c)
+            # the restriction does not apply to 100% of the segment (handled subsequently)
+            yrs_on_mkt = [[
+                yr for yr in m.yrs_on_mkt if meas_switch_avoids_reg[m_ind] or
+                int(yr) < effect_yr or effect_frac < 1] for m_ind, m in enumerate(measures_adj)]
+            # Set fractions that restrict part of a measure's applicable market in cases where
+            # restrictions only apply to a certain % of the segment and: a) measure does not
+            # fuel switch, b) the restriction is active, and c) the restriction does not apply
+            # to 100% of the segment; otherwise, set this fraction to 0
+            noapply_sbmkt_fracs_regs = [{
+                yr: effect_frac if not meas_switch_avoids_reg[m_ind] and (
+                    int(yr) >= effect_yr and effect_frac < 1) else 0
+                for yr in self.handyvars.aeo_years} for m_ind, m in enumerate(measures_adj)]
+        # If no restrictions are found, do not adjust the previously calculated years a measure
+        # is on the market and set further restrictions on market size to zero
+        else:
+            yrs_on_mkt = [m.yrs_on_mkt for m in measures_adj]
+            noapply_sbmkt_fracs_regs = [
+                {yr: 0 for yr in self.handyvars.aeo_years} for m in measures_adj]
+
+        return yrs_on_mkt, noapply_sbmkt_fracs_regs
+
+    def final_mktshare_adj(self, measures_adj, mseg_key, adopt_scheme,
+                           years_on_mkt_all, mkt_fracs, noapply_sbmkt_fracs_regs):
+        """Calclulate final mkt. share adjustments to reflect mkt. scaling and appliance regs.
+
+        Args:
             measures_adj (object): Competing ECM objects.
             mseg_key (string): Competed market microsegment information.
             adopt_scheme (string): Assumed consumer adoption scenario.
             years_on_mkt_all (list): List of years in which at least one
                 competing measure is on the market.
+            mkt_fracs (list): ECM market shares (before considering sub-mkts.).
+            noapply_sbmkt_fracs_regs (list): Share of market restricted by state-level appliance
+                regulations.
 
         Returns:
-            Market fractions to add to each ECM's competed market share to
-            reflect sub-market scaling in one or more competing ECMs.
-        """
-        # Set the fraction of the competed market that each ECM does not apply
-        # to (to be apportioned across the other competing ECMs);
-        # this fraction is broken out by year, and draws from sub-market
-        # scaling information for competing measures that may or may not
-        # also already be broken out by year
-        noapply_sbmkt_fracs = [
+            Market fractions to add to each ECM's competed market share to reflect sub-market
+            scaling or mseg regulatory restrictions in one or more competing ECMs. Also adjusts
+            original ECM market fractions downward as needed to reflect effects of the latter."""
+
+        # Set the fraction of the competed market that each ECM does not apply to (to be
+        # apportioned across the other competing ECMs), as specified in the measure's original
+        # definition; this fraction is broken out by year, and draws from sub-market scaling
+        # information for competing measures that may or may not also already be broken out by year
+        noapply_sbmkt_fracs_scale = [
             {yr: 1 - m.markets[adopt_scheme]["competed"]["mseg_adjust"][
                 "contributing mseg keys and values"][mseg_key][
                 "sub-market scaling"] for yr in self.handyvars.aeo_years}
@@ -2064,6 +2208,56 @@ class Engine(object):
                 "contributing mseg keys and values"][mseg_key][
                 "sub-market scaling"][yr] for yr in self.handyvars.aeo_years}
             for m in measures_adj]
+        # Check for competing ECMs that apply to but a fraction of the competed market – either
+        # because their market was restricted via sub-market scaling fractions in the measure
+        # definition, or they are subject to regulations that restrict a portion of their market.
+        # Apportion the remaining fraction of this market across the other competing ECMs
+        added_sbmkt_fracs_scale, added_sbmkt_fracs_regs = [
+            self.find_added_sbmkt_fracs(
+                mkt_fracs, measures_adj, mseg_key, adopt_scheme, years_on_mkt_all, x)
+            for x in [noapply_sbmkt_fracs_scale, noapply_sbmkt_fracs_regs]]
+        # Sum both types of market addition fractions
+        added_sbmkt_fracs = [
+            {yr: (added_sbmkt_fracs_scale[m_ind][yr] + added_sbmkt_fracs_regs[m_ind][yr])
+             for yr in self.handyvars.aeo_years} for m_ind, m in enumerate(measures_adj)]
+        # After additions have been calculated, adjust measure market fractions downward to
+        # account for effects of market removals from appliance restrictions, as applicable
+        # (note that downward adjustments for sub-market scaling are applied earlier in measure
+        # preparation in ecm_prep and thus do not need to be reflected again here.)
+        mkt_fracs = [{yr: mkt_fracs[m_ind][yr] * (1 - noapply_sbmkt_fracs_regs[m_ind][yr])
+                      for yr in self.handyvars.aeo_years} for m_ind, m in enumerate(measures_adj)]
+
+        return added_sbmkt_fracs, mkt_fracs
+
+    def find_added_sbmkt_fracs(
+            self, mkt_fracs, measures_adj, mseg_key, adopt_scheme,
+            years_on_mkt_all, noapply_sbmkt_fracs):
+        """Add to competed ECM market shares to account for sub-market scaling.
+
+        Notes:
+            In cases where one or more competing ECM only applies to a fraction
+            of its applicable baseline market (e.g., it is assigned with a sub-market scaling
+            fraction/fractions or is subject to appliance use restrictions that
+            affect its markets), the fraction of the market that the ECM(s) does not apply to
+            should be apportioned across the other competing ECMs and added to their competed
+            market shares. This function determines the added fraction that should be added to
+            each ECM's competed market share.
+
+        Args:
+            mkt_fracs (list): ECM market shares (before considering sub-mkts.).
+            measures_adj (object): Competing ECM objects.
+            mseg_key (string): Competed market microsegment information.
+            adopt_scheme (string): Assumed consumer adoption scenario.
+            years_on_mkt_all (list): List of years in which at least one
+                competing measure is on the market.
+            noapply_sbmkt_fracs_regs (list): List of market fractions that each measure
+                does not apply to (b/c of sub-market scaling specified in measure definition
+                or b/c of appliance restrictions on the current mseg.
+
+        Returns:
+            Market fractions to add to each ECM's competed market share to reflect sub-market
+            scaling or mseg regulatory restrictions in one or more competing ECMs.
+        """
         # Set a list used to verify that ECM gaining market share is on the
         # market in a given year
         yrs_on_mkt = [m.yrs_on_mkt for m in measures_adj]

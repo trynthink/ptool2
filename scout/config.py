@@ -32,6 +32,7 @@ class FilePaths:
     CONVERT_DATA = SUPPORTING_DATA / "convert_data"
     STOCK_ENERGY = SUPPORTING_DATA / "stock_energy_tech_data"
     TSV_DATA = SUPPORTING_DATA / "tsv_data"
+    SUB_FED = SUPPORTING_DATA / "sub_fed"
 
     # Non-package data:
     _parent_dir = Path.cwd()  # parent dir of repo
