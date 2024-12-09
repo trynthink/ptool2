@@ -416,6 +416,7 @@ class UsefulVars(object):
         env_heat_ls_scrn (tuple): Envelope heat gains to screen out of time-
             sensitive valuation for heating (no load shapes for these gains).
         skipped_ecms (int): List of names for ECMs skipped due to errors.
+        save_shp_warn (list): Tracks missing savings shape error history.
     """
 
     def __init__(self, base_dir, handyfiles, opts):
@@ -1684,6 +1685,7 @@ class UsefulVars(object):
             "windows solar", "equipment gain", "people gain",
             "other heat gain")
         self.skipped_ecms = []
+        self.save_shp_warn = []
 
     def set_peak_take(self, sysload_dat, restrict_key):
         """Fill in dicts with seasonal system load shape data.
@@ -2459,7 +2461,12 @@ class Measure(object):
                                     css_dict[eu_key][bd_key][cz_key][v_key] = {
                                         "CSV base frac. annual": base_l_frac,
                                         "CSV relative change": rel_chg}
-
+                    # Account for case where legacy CSV end use name "pool heaters and pumps"
+                    # is still used (current Scout baseline separates the two)
+                    if "pool" in eu_key:
+                        css_dict["pool heaters"], css_dict["pool pumps"] = (
+                            css_dict["pool heaters and pumps"] for n in range(2))
+                        del css_dict["pool heaters and pumps"]
                 # Set custom savings shape information to populated dict
                 self.tsv_features["shape"]["custom_annual_savings"] = \
                     css_dict
@@ -3960,7 +3967,7 @@ class Measure(object):
                             # alternate regions into the current mseg region,
                             # to arrive at a final market scaling value for
                             # that region
-                            if all([type(x) != dict for
+                            if all([not isinstance(x, dict) for
                                     x in mkt_scale_frac[0].values()]):
                                 mkt_scale_frac = sum([x * y for x, y in zip(
                                     mkt_scale_frac[0].values(),
@@ -7090,22 +7097,32 @@ class Measure(object):
                             if len(custom_hr_save_shape) == 0 or sum(
                                     custom_hr_save_shape[
                                         "CSV base frac. annual"]) == 0:
-                                warnings.warn(
-                                    "Measure '" + self.name + "', requires "
-                                    "custom savings shape data, but none were "
-                                    "found or all values were zero for the "
-                                    "combination of climate "
-                                    "zone " + load_fact_climate_key +
-                                    " (system load " + mult_sysshp_key_save +
-                                    "), building type " +
-                                    load_fact_bldg_key + ", and end use " +
-                                    eu + ". Assuming savings are zero for "
-                                    "this combination. If this is "
-                                    "unexpected, check that 8760 hourly "
-                                    "savings fractions are available for "
-                                    "all baseline market segments the "
-                                    "measure applies to in "
-                                    f"{fp.ECM_DEF / 'energy_plus_data' / 'savings_shapes'}.")
+                                # Register mseg info. that generated warning
+                                mseg_warn = str((
+                                    load_fact_climate_key, mult_sysshp_key_save,
+                                    load_fact_bldg_key, eu))
+                                print(self.handyvars.save_shp_warn.append(mseg_warn))
+                                # Warn user if hasn't been done already for this mseg info.
+                                if mseg_warn not in self.handyvars.save_shp_warn:
+                                    self.handyvars.save_shp_warn.append(mseg_warn)
+                                    verboseprint(
+                                        opts.verbose,
+                                        "WARNING: Measure '" + self.name + "', requires "
+                                        "custom savings shape data, but none were "
+                                        "found or all values were zero for the "
+                                        "combination of climate "
+                                        "zone " + load_fact_climate_key +
+                                        " (system load " + mult_sysshp_key_save +
+                                        "), building type " +
+                                        load_fact_bldg_key + ", and end use " +
+                                        eu + ". Assuming savings are zero for "
+                                        "this combination. If this is "
+                                        "unexpected, check that 8760 hourly "
+                                        "savings fractions are available for "
+                                        "all baseline market segments the "
+                                        "measure applies to in "
+                                        f"{fp.ECM_DEF / 'energy_plus_data' / 'savings_shapes'}.")
+
                             else:
                                 # Develop an adjustment from the generic
                                 # baseline load shape for the current climate,

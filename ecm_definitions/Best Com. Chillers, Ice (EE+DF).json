@@ -6,7 +6,7 @@
     }
   },
   "climate_zone": "all",
-  "bldg_type": "all commercial",
+  "bldg_type": "large office",
   "structure_type": "all",
   "end_use": ["cooling", "ventilation"],
   "fuel_type": "electricity",
