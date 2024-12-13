@@ -33,6 +33,7 @@ import gzip
 import pandas as pd
 from scout import mseg, com_mseg as cm
 from scout.config import FilePaths as fp
+import argparse
 
 
 class UsefulVars(object):
@@ -79,6 +80,7 @@ class UsefulVars(object):
             factors (principally costs) for a range of equipment types.
         aeo_metadata (str): File name for the custom AEO metadata JSON.
         geo_break (str): Indicates the intended geographical data breakdown.
+        res_hvac_adj (str): Data used to calibrate against EIA 861.
 
     Attributes: (if a method is called)
         res_climate_convert (str): File name for the residential buildings
@@ -97,6 +99,7 @@ class UsefulVars(object):
         self.conv_factors = fp.CONVERT_DATA / 'ecm_cost_convert.json'
         self.aeo_metadata = fp.METADATA_PATH
         self.geo_break = geo_break
+        self.res_hvac_adj = fp.CONVERT_DATA / 'res_hvac_adj.csv'
 
     def configure_for_energy_square_footage_stock_data(self):
         """Reconfigure stock and energy data to custom region."""
@@ -1345,6 +1348,76 @@ def walk(cpl_data, conversions, perf_convert, years, json_db,
     return json_db
 
 
+def res_hvac_energy_recalibrate(result, handyvars, flag_map_dat):
+    """Adjust residential baseline HVAC energy to align with EIA 861 data in calibration year.
+
+    Args:
+        result (dict): Uncalibrated baseline data (all other calculations finalized).
+        handyvars (object): Global variables useful across class methods.
+        flag_map_dat (dict): Info. used to set building types, fuel types, end uses.
+
+    Returns:
+        Baseline data after the residential HVAC energy calibration has been applied.
+    """
+
+    # Read in adjustment factors
+    res_hvac_adj = pd.read_csv(handyvars.res_hvac_adj)
+    # Set building types for adjustment
+    bts = flag_map_dat["res_bldg_types"]
+    # Set fuel type for adjustment
+    fuel = "electricity"
+    # Set end use for adjustment
+    eus = ["heating", "cooling"]
+    # Set tech types for adjustment (unique to heating/cooling)
+    ttypes = ["supply", "demand"]
+    # Set calibration year
+    yr_cal = "2018"
+
+    # Proceed to resiential HVAC microsegments and apply calibration factor
+
+    # Loop regions
+    for reg in result.keys():
+        # Pull 861 calibration adjustment factor for current region (states only, in rows)
+        res_hvac_adj_reg = res_hvac_adj[res_hvac_adj["state"] == reg]
+        # Loop building types
+        for bt in bts:
+            # Loop end uses
+            for eu in eus:
+                # Further constrain adjustment factor to current end use (column)
+                adj_fact_2018 = res_hvac_adj_reg[eu].iloc[0]
+                # Loop tech types
+                for tech_type in ttypes:
+                    # Shorthand for results to calibrate at the tech type level
+                    result_short = result[reg][bt][fuel][eu][tech_type]
+                    # Further loop through all technologies under the current branch
+                    for tech in result_short.keys():
+                        # If terminal energy values by year have been reached, set the
+                        # anchor year value to adjust other years' values against
+                        try:
+                            energy_yr_cal_bnch = result_short[tech]["energy"][yr_cal]
+                        except KeyError:
+                            raise KeyError(
+                                "Unexpected keys:val pairs in results dict when attempting to "
+                                "recalibrate residential HVAC energy values to state-level data "
+                                "for branch " + str((reg, bt, fuel, eu, tech_type, tech)))
+                        # Loop through all years and adjust by factor
+                        for yr in result_short[tech]["energy"].keys():
+                            # Set ratio of current year energy to benchmark year energy;
+                            # do not proceed with calibration if benchmark year is zero
+                            if energy_yr_cal_bnch != 0:
+                                ratio_2018 = result_short[tech]["energy"][yr] / energy_yr_cal_bnch
+                            else:
+                                ratio_2018 = None
+                            # Updated value is original 2018 value times adjustment factor
+                            # for 2018 value times original ratio of current year value to 2018
+                            # value
+                            if ratio_2018:
+                                result_short[tech]["energy"][yr] = \
+                                    energy_yr_cal_bnch * adj_fact_2018 * ratio_2018
+
+    return result
+
+
 def main():
     """Import external data files, process data, and produce desired output.
 
@@ -1396,6 +1469,13 @@ def main():
             if input_var[1] not in ['1', '2', '3']:
                 print('Please try again. Enter either 1, 2, or 3. '
                       'Use ctrl-c to exit.')
+
+    # Set up support for user option
+    parser = argparse.ArgumentParser()
+    # Set up user option to indicate whether factors to recalibrate residential HVAC energy
+    # use to better match EIA 861 state-level totals should be apply
+    parser.add_argument('-c', '--calibrate', action='store_true', help='Apply 861 calibration')
+    calibrate = parser.parse_args().calibrate
 
     # Instantiate object that contains useful variables
     handyvars = UsefulVars(input_var[1])
@@ -1650,6 +1730,12 @@ def main():
                 result = walk(
                     jscpl_data, jsconv_data, env_perf_convert, years, result,
                     aia_list, cdiv_list, emm_list)
+
+    # When state-level energy data are being updated, add a final step that recalibrates
+    # residential HVAC energy values to EIA 861 data to correct for under-prediction of
+    # heating and over-prediction of cooling in residential AEO estimates.
+    if calibrate and (input_var[0] == '1' and input_var[1] == '3'):
+        result = res_hvac_energy_recalibrate(result, handyvars, flag_map_dat)
 
     # Write the updated dict of data to a new JSON file
     with open(handyvars.json_out, 'w') as jso:
