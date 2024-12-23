@@ -80,7 +80,7 @@ class UsefulVars(object):
             factors (principally costs) for a range of equipment types.
         aeo_metadata (str): File name for the custom AEO metadata JSON.
         geo_break (str): Indicates the intended geographical data breakdown.
-        res_hvac_adj (str): Data used to calibrate against EIA 861.
+        res_calibrate (str): Data used to calibrate against EIA 861.
 
     Attributes: (if a method is called)
         res_climate_convert (str): File name for the residential buildings
@@ -99,7 +99,7 @@ class UsefulVars(object):
         self.conv_factors = fp.CONVERT_DATA / 'ecm_cost_convert.json'
         self.aeo_metadata = fp.METADATA_PATH
         self.geo_break = geo_break
-        self.res_hvac_adj = fp.CONVERT_DATA / 'res_hvac_adj.csv'
+        self.res_calibrate = fp.CONVERT_DATA / 'res_calibrate.csv'
 
     def configure_for_energy_square_footage_stock_data(self):
         """Reconfigure stock and energy data to custom region."""
@@ -1348,7 +1348,7 @@ def walk(cpl_data, conversions, perf_convert, years, json_db,
     return json_db
 
 
-def res_hvac_energy_recalibrate(result, handyvars, flag_map_dat):
+def res_energy_recalibrate(result, handyvars, flag_map_dat):
     """Adjust residential baseline HVAC energy to align with EIA 861 data in calibration year.
 
     Args:
@@ -1361,59 +1361,98 @@ def res_hvac_energy_recalibrate(result, handyvars, flag_map_dat):
     """
 
     # Read in adjustment factors
-    res_hvac_adj = pd.read_csv(handyvars.res_hvac_adj)
-    # Set building types for adjustment
+    res_calibrate = pd.read_csv(handyvars.res_calibrate)
+    # Set building types for adjustment (currently residential-only)
     bts = flag_map_dat["res_bldg_types"]
-    # Set fuel type for adjustment
+    # Set fuel type for adjustment (currently only electricity)
     fuel = "electricity"
-    # Set end use for adjustment
-    eus = ["heating", "cooling"]
-    # Set tech types for adjustment (unique to heating/cooling)
-    ttypes = ["supply", "demand"]
-    # Set calibration year
+    # Set end uses that have explicit calibration factors (heating, cooling, other end uses
+    # lumped together)
+    eus_w_cols = ["heating", "cooling"]
+    # Set calibration year (currently 2018 to match Stock weather data year)
     yr_cal = "2018"
 
-    # Proceed to resiential HVAC microsegments and apply calibration factor
+    # Loop through microsegments and apply calibration factors
 
-    # Loop regions
+    # Loop regions (states)
     for reg in result.keys():
-        # Pull 861 calibration adjustment factor for current region (states only, in rows)
-        res_hvac_adj_reg = res_hvac_adj[res_hvac_adj["state"] == reg]
-        # Loop building types
+        # Pull 861 calibration adjustment factor for current state
+        res_calibrate_reg = res_calibrate[res_calibrate["state"] == reg]
+        # Loop residential building types
         for bt in bts:
             # Loop end uses
-            for eu in eus:
-                # Further constrain adjustment factor to current end use (column)
-                adj_fact_2018 = res_hvac_adj_reg[eu].iloc[0]
-                # Loop tech types
+            for eu in result[reg][bt][fuel].keys():
+                # Determine whether calibration data are available explicitly for the end use;
+                # if so, pull data with direct end use name; otherwise set name to use
+                if eu in eus_w_cols:
+                    eu_col = eu
+                # Secondary heating lumped in with heating in the Scout breakout data that
+                # were used to develop calibration factors
+                elif eu == "secondary heating":
+                    eu_col = "heating"
+                # All non-heating/cooling calibration is lumped together into one set of factors
+                else:
+                    eu_col = "non_hvac"
+                # Further constrain adjustment factor for a given benchmark year to the data
+                # corresponding to the current end use (column)
+                adj_fact_bnch = res_calibrate_reg[eu_col].iloc[0]
+
+                # Set shorthand for results data filtered down to end use level
+                result_eu = result[reg][bt][fuel][eu]
+
+                # Determine whether data are nested by technology type (unique to heating and
+                # cooling segments); if not, set tech. type to None
+                if all([x in result[reg][bt][fuel][eu].keys() for x in ["supply", "demand"]]):
+                    ttypes = ["supply", "demand"]
+                else:
+                    ttypes = [None]
+                # Loop tech types (if applicable)
                 for tech_type in ttypes:
-                    # Shorthand for results to calibrate at the tech type level
-                    result_short = result[reg][bt][fuel][eu][tech_type]
+                    # Set shorthand for results to calibrate at the end use/tech type level
+                    if tech_type is not None:
+                        result_ttype = result_eu[tech_type]
+                    else:
+                        result_ttype = result_eu
+                    # Find technology-level keys if technology is not None
+                    if all([x not in result_ttype.keys() for x in ["stock", "energy"]]):
+                        tech_keys = result_ttype.keys()
+                    else:
+                        tech_keys = [None]
                     # Further loop through all technologies under the current branch
-                    for tech in result_short.keys():
-                        # If terminal energy values by year have been reached, set the
-                        # anchor year value to adjust other years' values against
+                    for tech in tech_keys:
+                        # Terminal energy values (broken out by year) have been reached; set the
+                        # anchor year value to adjust other years' values against; raise Error
+                        # if energy data can't be pulled as expected
                         try:
-                            energy_yr_cal_bnch = result_short[tech]["energy"][yr_cal]
+                            if all([x is not None for x in [tech_type, tech]]):
+                                # Further restrict end use data down to energy level
+                                result_yr = result_eu[tech_type][tech]["energy"]
+                            elif tech is not None:
+                                result_yr = result_eu[tech]["energy"]
+                            else:
+                                result_yr = result_eu["energy"]
+                            # Set benchmark energy value to that in the calibration year
+                            energy_yr_cal_bnch = result_yr[yr_cal]
                         except KeyError:
                             raise KeyError(
-                                "Unexpected keys:val pairs in results dict when attempting to "
-                                "recalibrate residential HVAC energy values to state-level data "
+                                "Unexpected key:val pair(s) in results dict when attempting to "
+                                "recalibrate residential energy values to state-level data "
                                 "for branch " + str((reg, bt, fuel, eu, tech_type, tech)))
-                        # Loop through all years and adjust by factor
-                        for yr in result_short[tech]["energy"].keys():
-                            # Set ratio of current year energy to benchmark year energy;
-                            # do not proceed with calibration if benchmark year is zero
+                        # Loop through all years in the data, compare values against that of the
+                        # benchmark year, and adjust accordingly
+                        for yr in result_yr.keys():
+                            # Set ratio of current year energy (pre-calibration) to benchmark year
+                            # energy (also pre-calibration); do not proceed with calibration if
+                            # benchmark year is zero
                             if energy_yr_cal_bnch != 0:
-                                ratio_2018 = result_short[tech]["energy"][yr] / energy_yr_cal_bnch
+                                ratio_bnch = result_yr[yr] / energy_yr_cal_bnch
                             else:
-                                ratio_2018 = None
-                            # Updated value is original 2018 value times adjustment factor
-                            # for 2018 value times original ratio of current year value to 2018
-                            # value
-                            if ratio_2018:
-                                result_short[tech]["energy"][yr] = \
-                                    energy_yr_cal_bnch * adj_fact_2018 * ratio_2018
+                                ratio_bnch = None
+                            # Updated value is original benchmark year value times adjust. factor
+                            # for benchmark year value times original ratio of current year value
+                            # to benchmark year value
+                            if ratio_bnch:
+                                result_yr[yr] = energy_yr_cal_bnch * adj_fact_bnch * ratio_bnch
 
     return result
 
@@ -1732,10 +1771,9 @@ def main():
                     aia_list, cdiv_list, emm_list)
 
     # When state-level energy data are being updated, add a final step that recalibrates
-    # residential HVAC energy values to EIA 861 data to correct for under-prediction of
-    # heating and over-prediction of cooling in residential AEO estimates.
+    # residential energy values to EIA 861 data for a given historical benchmark year.
     if calibrate and (input_var[0] == '1' and input_var[1] == '3'):
-        result = res_hvac_energy_recalibrate(result, handyvars, flag_map_dat)
+        result = res_energy_recalibrate(result, handyvars, flag_map_dat)
 
     # Write the updated dict of data to a new JSON file
     with open(handyvars.json_out, 'w') as jso:
