@@ -17,7 +17,7 @@ from ast import literal_eval
 import math
 import pandas as pd
 import time
-from datetime import datetime
+# from datetime import datetime
 from pathlib import PurePath, Path
 import argparse
 from scout.ecm_prep_args import ecm_args
@@ -498,7 +498,7 @@ class UsefulVars(object):
         # Load metadata including AEO year range
         aeo_yrs = Utils.load_json(handyfiles.metadata)
         # Set minimum modeling year to current year
-        aeo_min = 2023
+        aeo_min = 2018
         # Set maximum modeling year
         aeo_max = aeo_yrs["max year"]
         # Derive time horizon from min/max years
@@ -2588,16 +2588,16 @@ class Measure(object):
                 # subsequent use in the 'apply_tsv' function
                 try:
                     self.backup_fuel_fraction = \
-                        pd.read_csv(join(
-                            handyfiles.backup_fuel_data,
-                            csv_bkup_fuel_file_name))
+                        pd.read_csv(
+                            handyfiles.backup_fuel_data /
+                            csv_bkup_fuel_file_name)
                 except OSError:
                     raise OSError(
                         "Backup fuel fraction data file indicated in "
                         "'backup_fuel_fraction' attribute of measure '" +
                         self.name + "' not found; "
-                        "looking for file " + join(
-                            handyfiles.backup_fuel_data,
+                        "looking for file " + (
+                            handyfiles.backup_fuel_data /
                             csv_bkup_fuel_file_name) + ". ")
         except AttributeError:
             self.backup_fuel_fraction = None
@@ -8742,6 +8742,13 @@ class Measure(object):
             # cooling mseg with links to the switching rates of another mseg
             # that have already been determined
             if not diffuse_frac_linked and hp_rate and mskeys[0] == "primary":
+                # Set HP rate for the year; if year is before HP rates are
+                # available, set to zero.
+                try:
+                    hp_rate_yr = hp_rate[yr]
+                except KeyError:
+                    hp_rate_yr = 0
+
                 # Find the annual fraction of the total stock that is converted
                 # to a heat pump; set to 100% for technical potential,
                 # otherwise set to the new/replacement stock (and, if user
@@ -8764,9 +8771,9 @@ class Measure(object):
                         retro_remain = 0
                     elif opts.exog_hp_rates[1] == '2':  # Frac. retro. to HPs
                         # Converted retrofits
-                        retro_convert = retro_frac * hp_rate[yr]
+                        retro_convert = retro_frac * hp_rate_yr
                         # Remaining retrofits
-                        retro_remain = retro_frac * (1 - hp_rate[yr])
+                        retro_remain = retro_frac * (1 - hp_rate_yr)
                     # Case with exogenous rates but no early retrofits
                     else:
                         retro_convert, retro_remain = [retro_frac, 0]
@@ -8777,10 +8784,10 @@ class Measure(object):
                     if stock_total_hp_convert_frac != 1:
                         # Frac. total stock that converted to HP in year
                         annual_hp_convert_frac = (new_frac + repl_frac) * \
-                            hp_rate[yr] + retro_convert
+                            hp_rate_yr + retro_convert
                         # Frac. total stock that remains with base fuel in year
                         annual_hp_remain_frac = (new_frac + repl_frac) * (
-                            1 - hp_rate[yr]) + retro_remain
+                            1 - hp_rate_yr) + retro_remain
                     else:
                         annual_hp_convert_frac = \
                             new_frac + repl_frac + retro_convert
