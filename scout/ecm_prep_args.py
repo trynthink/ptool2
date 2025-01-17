@@ -13,7 +13,7 @@ def ecm_args(args: list = None) -> argparse.NameSpace:  # noqa: F821
             arguments will be used in Config. Defaults to None.
     """
 
-    # Retrieve config file and CLI arguments
+    # Retrieve  config file and CLI arguments
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter,
                             epilog="For more detail please read: "
                             "https://scout-bto.readthedocs.io/en/latest/tutorials.html"
