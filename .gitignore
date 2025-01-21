@@ -109,3 +109,9 @@ _build
 
 build/
 scout.egg-info/
+
+# Exclude #
+###########
+
+!tests/integration_testing/results/plots/tech_potential/*.xlsx
+!tests/integration_testing/results/plots/max_adopt_potential/*.xlsx

@@ -61,7 +61,22 @@ jobs:
           else
             python tests/integration_testing/run_workflow.py --yaml tests/integration_testing/integration_test.yml
           fi
-          mv ./results/*.json ./tests/integration_testing/results/
+          rm -rf ./tests/integration_testing/results/*
+          mv ./results/* ./tests/integration_testing/results/
+      - name: Compare integration test results
+        run: |
+          #FIXME temporarily pull from ci_outputs
+          git fetch origin master ci_outputs
+          branch_name="${{ github.ref }}"
+          if [[ $(git diff --exit-code origin/master ./tests/integration_testing/results/agg_results.json ./tests/integration_testing/results/ecm_results.json) ]]; then
+            mkdir tests/integration_testing/base_results
+            git show origin/ci_outputs:tests/integration_testing/results/agg_results.json > tests/integration_testing/base_results/agg_results.json
+            git show origin/ci_outputs:tests/integration_testing/results/ecm_results.json > tests/integration_testing/base_results/ecm_results.json
+            git show origin/ci_outputs:tests/integration_testing/results/plots/tech_potential/Summary_Data-TP.xlsx > tests/integration_testing/base_results/Summary_Data-TP.xlsx
+            git show origin/ci_outputs:tests/integration_testing/results/plots/max_adopt_potential/Summary_Data-MAP.xlsx > tests/integration_testing/base_results/Summary_Data-MAP.xlsx
+
+            python tests/integration_testing/compare_results.py --base-dir tests/integration_testing/base_results --new-dir tests/integration_testing/results
+          fi
       - name: Upload artifacts
         uses: actions/upload-artifact@v3
         with:
@@ -73,6 +88,7 @@ jobs:
           git pull origin $branch_name
           git add ./tests/integration_testing/results/*.json
           if [[ $(git diff --cached --exit-code) ]]; then
+            git add ./tests/integration_testing/results/plots
             git config --system user.email "github-action@users.noreply.github.com"
             git config --system user.name "GitHub Action"
             git commit -m "Upload results files from CI build"
