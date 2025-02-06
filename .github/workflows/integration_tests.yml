@@ -50,8 +50,12 @@ jobs:
           pip install . psrecord
       - name: Run and profile workflow
         run: |
-          branch_name="${{ github.ref_name }}"
-          if [[ $branch_name == 'refs/heads/master' ]]; then
+          branch_ref="${{ github.ref }}"
+              if [ -z "$branch_ref" ]; then
+                echo "Error: $branch_ref is empty. This workflow requires a valid branch reference."
+                exit 1
+              fi
+          if [[ $branch_ref == 'refs/heads/master' ]]; then
             steps=("ecm_prep" "run")
             for step in "${steps[@]}"; do
               psrecord --log memory_log_${step}.txt --include-children --interval 1 "python tests/integration_testing/run_workflow.py --run_step $step --yaml tests/integration_testing/integration_test.yml --with_profiler"
@@ -63,21 +67,21 @@ jobs:
           fi
           mv ./results/*.json ./tests/integration_testing/results/
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: results
           path: ./tests/integration_testing/results/
       - name: Commit test results
         run: |
-          branch_name="${{ github.ref_name }}"
-          git pull origin $branch_name
+          branch_ref="${{ github.ref }}"
+          git pull origin $branch_ref
           git add ./tests/integration_testing/results/*.json
           if [[ $(git diff --cached --exit-code) ]]; then
             git config --system user.email "github-action@users.noreply.github.com"
             git config --system user.name "GitHub Action"
             git commit -m "Upload results files from CI build"
-            echo "Pushing to branch: $branch_name"
-            git push -u origin $branch_name
+            echo "Pushing to branch: $branch_ref"
+            git push -u origin $branch_ref
 
             # Set status checks to success
             checks=("code-quality-checks" "python-tests (3.10)" "python-tests (3.11)" "python-tests (3.12)" "integration-tests / Integration Testing")
